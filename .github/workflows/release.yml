@@ -1,50 +1,66 @@
 name: Release
 
-# CLI binary line. Tag namespace `v<semver>` triggers this — it builds the
-# release archives + checksums, publishes the GitHub release, and updates the
-# Homebrew cask. npm is a SEPARATE line (release-npm.yml, `npm-v*`) so an npm
-# prerelease can ship without forcing the stable cask, and vice versa; desktop is
-# `desktop-v*` (release-desktop.yml). A prerelease `v*-rc*` still builds archives
-# and a prerelease GitHub release, but goreleaser auto-skips the cask upload
-# (brew has no prerelease channel — see .goreleaser.yaml).
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write # create the release and upload archives
+  contents: write
 
 jobs:
-  cache-guard:
-    name: cache hit guard
+  build:
+    name: Build + Upload
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - run: ./scripts/cache-guard.sh
-
-  goreleaser:
-    name: archives + checksums + homebrew tap
-    needs: cache-guard
-    runs-on: ubuntu-latest
-    # CLI stable release (archives + GitHub release + Homebrew cask). Gated on the
-    # `release` environment so only esengine can approve it going public.
-    environment: release
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          version: '~> v2'
-          args: release --clean
+
+      - name: Cross-compile binaries
+        run: |
+          mkdir -p dist
+          for p in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            os="${p%/*}"
+            arch="${p#*/}"
+            ext=""
+            [ "$os" = "windows" ] && ext=".exe"
+            echo "Building $os/$arch..."
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
+              -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+              -trimpath \
+              -o "dist/reasonix-${os}-${arch}${ext}" \
+              ./cmd/reasonix
+          done
+          ls -lh dist/
+
+      - name: Package archives
+        run: |
+          cd dist
+          for f in reasonix-darwin-* reasonix-linux-*; do
+            tar czf "${f}.tar.gz" "$f"
+          done
+          for f in reasonix-windows-*; do
+            zip "${f%.exe}.zip" "$f"
+          done
+          ls -lh
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum reasonix-*.tar.gz reasonix-*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload assets to release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          for asset in reasonix-*.tar.gz reasonix-*.zip SHA256SUMS; do
+            echo "Uploading $asset..."
+            gh release upload "${{ github.ref_name }}" "$asset" --repo "${{ github.repository }}" --clobber
+          done
