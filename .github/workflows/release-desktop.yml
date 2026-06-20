@@ -3,102 +3,94 @@ name: Release Desktop
 on:
   push:
     tags: ["desktop-v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to publish (e.g. desktop-v1.0.0)"
-        required: true
-        type: string
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: build (${{ matrix.name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: macos-14,   platform: darwin-universal,  name: darwin-universal, ext: ".dmg" }
-          - { runner: windows-latest, platform: windows-amd64, name: windows-amd64,    ext: ".exe" }
-          - { runner: ubuntu-22.04,   platform: linux-amd64,   name: linux-amd64,      ext: ".AppImage" }
-    runs-on: ${{ matrix.runner }}
+  build-windows:
+    name: Windows (amd64)
+    runs-on: windows-latest
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v6
-
       - uses: actions/setup-go@v6
         with:
           go-version-file: desktop/go.mod
           cache: true
           cache-dependency-path: desktop/go.sum
-
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-
       - uses: pnpm/action-setup@v6
         with:
           version: 10
-
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc libgtk-3-dev libwebkit2gtk-4.1-dev
-
-      - name: Install macOS deps
-        if: runner.os == 'macOS'
-        run: brew install create-dmg
-
-      - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
-
-      - name: Resolve version
-        id: ver
-        run: |
-          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#desktop-v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build
-        id: build
-        run: |
-          mkdir -p dist
-          cd desktop
-          wails build -clean
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            # create-dmg packages the .app
-            VERSION="${{ steps.ver.outputs.version }}"
-            create-dmg --overwrite --dmg-title="Reasonix-SonettoHere-${VERSION}" build/bin/Reasonix.app dist/ || true
-          fi
-          # Copy the binary/package to dist/
-          if [ -d "build/bin" ]; then
-            cp -r build/bin/* ../dist/ 2>/dev/null || true
-          fi
-
-      - name: Find artifacts
-        id: artifacts
-        run: |
-          ls -lh dist/
-          echo "files=$(ls dist/)" >> "$GITHUB_OUTPUT"
-
-      - name: Upload to release
+      - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+      - run: cd desktop && wails build -clean
+      - run: gh release upload "${{ github.ref_name }}" desktop/build/bin/reasonix-desktop.exe --repo "${{ github.repository }}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+
+  build-macos:
+    name: macOS (universal)
+    runs-on: macos-14
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache: true
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+      - run: brew install create-dmg
+      - run: cd desktop && wails build -clean
+      - name: Package DMG
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
-          # Create release if doesn't exist
-          gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --title "Reasonix-SonettoHere Desktop ${{ steps.ver.outputs.version }}" \
-            --notes "Desktop GUI release" \
-            || true
-          # Upload all artifacts
-          for f in dist/*; do
-            echo "Uploading $f..."
-            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber
-          done
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          create-dmg --overwrite --dmg-title="Reasonix-SonettoHere-${VERSION}" desktop/build/bin/Reasonix.app dist/Reasonix-SonettoHere-${VERSION}.dmg || true
+          ls -la dist/ 2>/dev/null || true
+      - run: |
+          if [ -f dist/*.dmg ]; then
+            gh release upload "${{ github.ref_name }}" dist/*.dmg --repo "${{ github.repository }}" --clobber
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build-linux:
+    name: Linux (amd64)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache: true
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libwebkit2gtk-4.1-dev
+      - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+      - run: cd desktop && wails build -tags webkit2_41 -clean
+      - run: gh release upload "${{ github.ref_name }}" desktop/build/bin/reasonix-desktop --repo "${{ github.repository }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
